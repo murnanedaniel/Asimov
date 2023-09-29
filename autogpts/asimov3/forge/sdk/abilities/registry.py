@@ -178,6 +178,7 @@ class AbilityRegister:
             Exception: If there is an error in running the ability.
         """
         try:
+            print("Running ability:", task_id, ability_name, args, kwds)
             ability = self.abilities[ability_name]
             return await ability(self.agent, task_id, *args, **kwds)
         except Exception:

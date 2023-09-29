@@ -20,6 +20,8 @@ async def list_files(agent, task_id: str, path: str) -> List[str]:
     """
     List files in a workspace directory
     """
+
+    path = str(path)
     return agent.workspace.list(task_id=task_id, path=path)
 
 
@@ -57,6 +59,9 @@ async def write_file(agent, task_id: str, file_path: str, data: bytes) -> None:
         agent_created=True,
     )
 
+    agent.chat_history.append(
+        {"role": "assistant", "content": f"I have now completed the task of writing a file to {file_path} with the following data: {data}"}
+    )
 
 @ability(
     name="read_file",
@@ -75,4 +80,9 @@ async def read_file(agent, task_id: str, file_path: str) -> bytes:
     """
     Read data from a file
     """
+
+    agent.chat_history.append(
+        {"role": "assistant", "content": f"I have now completed the task of reading a file from {file_path}"}
+    )
+
     return agent.workspace.read(task_id=task_id, path=file_path)

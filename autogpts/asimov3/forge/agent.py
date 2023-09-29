@@ -79,6 +79,8 @@ class ForgeAgent(Agent):
         """
         super().__init__(database, workspace)
 
+        self.chat_history = []
+
     async def create_task(self, task_request: TaskRequestBody) -> Task:
         """
         The agent protocol, which is the core of the Forge, works by creating a task and then
@@ -92,6 +94,35 @@ class ForgeAgent(Agent):
         LOG.info(
             f"📦 Task created: {task.task_id} input: {task.input[:40]}{'...' if len(task.input) > 40 else ''}"
         )
+
+        # Load up the prompt engine
+        LOG.info("Loading prompt engine...")
+        prompt_engine = PromptEngine("gpt-3.5-turbo")
+
+        # Start with a system prompt
+        LOG.info("Loading system prompt...")
+        system_prompt = prompt_engine.load_prompt("system-format")
+
+        # Specifying the task parameters
+        LOG.info("Specifying task parameters...")
+        task_kwargs = {
+            "task": task.input,
+            "abilities": self.abilities.list_abilities_for_prompt()
+        }
+
+        # Then, load the task prompt with the designated parameters
+        LOG.info("Loading task prompt...")
+        task_prompt = prompt_engine.load_prompt("task-step", **task_kwargs)
+
+        # Create message list
+        LOG.info("Creating message list...")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": task_prompt}
+        ]
+
+        self.chat_history = messages
+
         return task
 
     async def execute_step(self, task_id: str, step_request: StepRequestBody) -> Step:
@@ -119,24 +150,100 @@ class ForgeAgent(Agent):
         multiple steps. Returning a request to continue in the step output, the user can then decide
         if they want the agent to continue or not.
         """
-        # An example that
-        step = await self.db.create_step(
-            task_id=task_id, input=step_request, is_last=True
-        )
-
-        self.workspace.write(task_id=task_id, path="output.txt", data=b"Washington D.C")
-
-
-        await self.db.create_artifact(
-            task_id=task_id,
-            step_id=step.step_id,
-            file_name="output.txt",
-            relative_path="",
-            agent_created=True,
-        )
         
-        step.output = "Miami D.C"
+        task = await self.db.get_task(task_id)
 
-        LOG.info(f"\t✅ Final Step completed: {step.step_id}")
+        step = await self.db.create_step(
+            task_id=task_id, input=step_request, is_last=False
+        )
+        LOG.info(pprint.pformat(f"Step created: {step.step_id}, input: {step.input}"))
+
+        messages = self.chat_history
+
+        # Retrieve all artifacts for the current task
+        artifacts = await self.list_artifacts(task_id)
+
+        # # Check if the artifact list is empty
+        # if not artifacts.artifacts:
+        #     LOG.info("No artifacts found for this task.")
+        # else:
+        #     # Format the artifacts into a string, handling artifacts without a file name
+        #     artifact_list = ", ".join([artifact.file_name if artifact.file_name else "Unnamed artifact" for artifact in artifacts.artifacts])
+
+        #     # Append the artifact list to the messages
+        #     messages.append({"role": "assistant", "content": f"I have already created the following artifacts: {artifact_list}"})
+
+        for message in messages:
+            print("--------------------------------------------------------------------------------------------")
+            print(f"{message['role']}: {message['content']}")
+            print("--------------------------------------------------------------------------------------------")
+
+        for attempt in range(3):
+            try:
+                LOG.info("Generating chat completion request...")
+                chat_completion_kwargs = {
+                    "messages": messages,
+                    # "model": "gpt-3.5-turbo"
+                    "model": "gpt-4"
+                }
+
+                chat_response = await chat_completion_request(**chat_completion_kwargs)
+                LOG.info(pprint.pformat(f"Chat response: {chat_response}"))
+                answer = json.loads(chat_response["choices"][0]["message"]["content"])
+                break
+
+            except json.JSONDecodeError as e:
+                # Handle JSON decoding errors
+                LOG.info("Error decoding chat response.")
+                LOG.error(pprint.pformat(f"Unable to decode chat response: {chat_response}"))
+                if attempt == 2:
+                    raise
+            except Exception as e:
+                # Handle other exceptions
+                LOG.info("Error generating chat response.")
+                LOG.error(pprint.pformat(f"Unable to generate chat response: {e}"))
+                if attempt == 2:
+                    raise
+
+        self.chat_history.append({"role": "assistant", "content": json.dumps(answer)})
+
+        # Extract the ability from the answer
+        LOG.info("Extracting ability from answer...")
+        ability = answer["ability"]
+        LOG.info(pprint.pformat(f"Ability: {ability}"))
+
+        # Run the ability and get the output
+        LOG.info("Running ability...")
+        try:
+            output = await self.abilities.run_ability(
+                task_id, ability["name"], **ability["args"]
+            )
+            if output:
+                self.chat_history.append({"role": "assistant", "content": f"Here is the output of the ability {ability['name']} applied to {ability['args']}: {output}"})
+        except Exception as e:
+            LOG.info("Error running ability.")
+            LOG.error(pprint.pformat(f"Unable to run ability: {e}"))
+            step.is_last = True
+            LOG.info("Step is due to finish.")
+
+        # Set the step output to the "speak" part of the answer
+        LOG.info("Setting step output...")
+        if "thoughts" in answer and "speak" in answer["thoughts"]:
+            step.output = answer["thoughts"]["speak"]
+        elif "thoughts" in answer:
+            step.output = answer["thoughts"]
+        else:
+            step.output = answer
+
+        # Return the completed step
+        LOG.info("Step execution completed.")
+
+        self.chat_history.append({"role": "user", "content": "Okay, what's next? Remember, answer in the provided abilities format."})
+
+        if ability["name"] == "finish":
+            step.is_last = True
+            LOG.info("Step is due to finish.")
+
+        LOG.info("--------------------------------------------------------------------------------------------")
 
         return step
