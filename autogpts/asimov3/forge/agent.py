@@ -79,7 +79,8 @@ class ForgeAgent(Agent):
         """
         super().__init__(database, workspace)
 
-        self.chat_history = []
+        self.action_chat_history = []
+        self.planning_chat_history = []
 
     async def create_task(self, task_request: TaskRequestBody) -> Task:
         """
@@ -101,54 +102,58 @@ class ForgeAgent(Agent):
 
         # Start with a system prompt
         LOG.info("Loading system prompt...")
-        system_prompt = prompt_engine.load_prompt("system-format")
-
-        # Specifying the task parameters
-        LOG.info("Specifying task parameters...")
-        task_kwargs = {
-            "task": task.input,
-            "abilities": self.abilities.list_abilities_for_prompt()
-        }
+        system_prompt_actor = prompt_engine.load_prompt("system-format_actor", abilities=self.abilities.list_abilities_for_prompt())
+        system_prompt_planner = prompt_engine.load_prompt("system-format_planner", abilities=self.abilities.list_abilities_for_prompt())
 
         # Then, load the task prompt with the designated parameters
         LOG.info("Loading task prompt...")
-        task_prompt = prompt_engine.load_prompt("task-step", **task_kwargs)
-
+        task_prompt_planner = prompt_engine.load_prompt("task-intro_planner", task = task.input)
+        
         # Create message list
         LOG.info("Creating message list...")
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task_prompt}
+        messages_planner = [
+            {"role": "system", "content": system_prompt_planner},
+            {"role": "user", "content": task_prompt_planner}
         ]
 
-        self.chat_history = messages
+        self.planning_chat_history = messages_planner
+
+        # Generate the chat response
+        for attempt in range(3):
+            try:
+                LOG.info("Generating chat response...")
+                chat_response_planner = await chat_completion_request(messages=messages_planner, model="gpt-3.5-turbo")
+                LOG.info(pprint.pformat(f"Chat response: {chat_response_planner}"))
+
+                answer = json.loads(chat_response_planner["choices"][0]["message"]["content"])
+                initial_plan = answer["thoughts"]["plan"]
+                break
+            except Exception as e:
+                LOG.error(f"Attempt {attempt+1} failed with error: {e}")
+                if attempt == 2:
+                    raise
+
+        # Load into actor messages
+        LOG.info("Loading actor messages...")
+        task_prompt_actor = prompt_engine.load_prompt("task-intro_actor", task = task.input, plan = initial_plan)
+        messages_actor = [
+            {"role": "system", "content": system_prompt_actor},
+            {"role": "user", "content": task_prompt_actor}
+        ]
+
+        self.action_chat_history = messages_actor
 
         return task
 
     async def execute_step(self, task_id: str, step_request: StepRequestBody) -> Step:
         """
-        The agent protocol, which is the core of the Forge, works by creating a task and then
-        executing steps for that task. This method is called when the agent is asked to execute
-        a step.
-
-        The task that is created contains an input string, for the bechmarks this is the task
-        the agent has been asked to solve and additional input, which is a dictionary and
-        could contain anything.
-
-        If you want to get the task use:
-
-        ```
-        task = await self.db.get_task(task_id)
-        ```
-
-        The step request body is essentailly the same as the task request and contains an input
-        string, for the bechmarks this is the task the agent has been asked to solve and
-        additional input, which is a dictionary and could contain anything.
-
-        You need to implement logic that will take in this step input and output the completed step
-        as a step object. You can do everything in a single step or you can break it down into
-        multiple steps. Returning a request to continue in the step output, the user can then decide
-        if they want the agent to continue or not.
+        The structure here is:
+        1. Get the task and step info
+        2. Run the action, given the chat history, and a current running plan
+        3. Update the chat history with the action response
+        4. Update the chat history with a printout of the action (called in the ability itself)
+        5. Load the planning user step prompt, with the output of the action in the prompt
+        6. Run the planning chat completion, and update the current running plan
         """
         
         task = await self.db.get_task(task_id)
@@ -158,22 +163,7 @@ class ForgeAgent(Agent):
         )
         LOG.info(pprint.pformat(f"Step created: {step.step_id}, input: {step.input}"))
 
-        messages = self.chat_history
-
-        # Retrieve all artifacts for the current task
-        artifacts = await self.list_artifacts(task_id)
-
-        # # Check if the artifact list is empty
-        # if not artifacts.artifacts:
-        #     LOG.info("No artifacts found for this task.")
-        # else:
-        #     # Format the artifacts into a string, handling artifacts without a file name
-        #     artifact_list = ", ".join([artifact.file_name if artifact.file_name else "Unnamed artifact" for artifact in artifacts.artifacts])
-
-        #     # Append the artifact list to the messages
-        #     messages.append({"role": "assistant", "content": f"I have already created the following artifacts: {artifact_list}"})
-
-        for message in messages:
+        for message in self.action_chat_history:
             print("--------------------------------------------------------------------------------------------")
             print(f"{message['role']}: {message['content']}")
             print("--------------------------------------------------------------------------------------------")
@@ -182,14 +172,29 @@ class ForgeAgent(Agent):
             try:
                 LOG.info("Generating chat completion request...")
                 chat_completion_kwargs = {
-                    "messages": messages,
-                    # "model": "gpt-3.5-turbo"
-                    "model": "gpt-4"
+                    "messages": self.action_chat_history,
+                    "model": "gpt-3.5-turbo"
+                    # "model": "gpt-4"
                 }
 
                 chat_response = await chat_completion_request(**chat_completion_kwargs)
                 LOG.info(pprint.pformat(f"Chat response: {chat_response}"))
                 answer = json.loads(chat_response["choices"][0]["message"]["content"])
+
+                self.chat_history.append({"role": "assistant", "content": json.dumps(answer)})
+
+                # Extract the ability from the answer
+                LOG.info("Extracting ability from answer...")
+                ability = answer["ability"]
+                LOG.info(pprint.pformat(f"Ability: {ability}"))
+
+                # Run the ability and get the output
+                LOG.info("Running ability...")
+                output = await self.abilities.run_ability(
+                    task_id, ability["name"], **ability["args"]
+                )
+                if output:
+                    self.chat_history.append({"role": "assistant", "content": f"Here is the output of the ability {ability['name']} applied to {ability['args']}: {output}"})
                 break
 
             except json.JSONDecodeError as e:
@@ -205,26 +210,8 @@ class ForgeAgent(Agent):
                 if attempt == 2:
                     raise
 
-        self.chat_history.append({"role": "assistant", "content": json.dumps(answer)})
-
-        # Extract the ability from the answer
-        LOG.info("Extracting ability from answer...")
-        ability = answer["ability"]
-        LOG.info(pprint.pformat(f"Ability: {ability}"))
-
-        # Run the ability and get the output
-        LOG.info("Running ability...")
-        try:
-            output = await self.abilities.run_ability(
-                task_id, ability["name"], **ability["args"]
-            )
-            if output:
-                self.chat_history.append({"role": "assistant", "content": f"Here is the output of the ability {ability['name']} applied to {ability['args']}: {output}"})
-        except Exception as e:
-            LOG.info("Error running ability.")
-            LOG.error(pprint.pformat(f"Unable to run ability: {e}"))
-            step.is_last = True
-            LOG.info("Step is due to finish.")
+        step.is_last = True
+        LOG.info("Step is due to finish.")
 
         # Set the step output to the "speak" part of the answer
         LOG.info("Setting step output...")
@@ -235,10 +222,43 @@ class ForgeAgent(Agent):
         else:
             step.output = answer
 
-        # Return the completed step
-        LOG.info("Step execution completed.")
+        user_message = prompt_engine.load_prompt("user-step_planner", step_output = answer)
+        self.planning_chat_history.append({"role": "user", "content": user_message})
 
-        self.chat_history.append({"role": "user", "content": "Okay, what's next? Remember, answer in the provided abilities format."})
+        for message in self.planning_chat_history:
+            print("--------------------------------------------------------------------------------------------")
+            print(f"{message['role']}: {message['content']}")
+            print("--------------------------------------------------------------------------------------------")
+
+        for attempt in range(3):
+            try:
+                LOG.info("Generating chat completion request...")
+                chat_completion_kwargs = {
+                    "messages": self.planning_chat_history,
+                    "model": "gpt-3.5-turbo"
+                    # "model": "gpt-4"
+                }
+
+                chat_response = await chat_completion_request(**chat_completion_kwargs)
+                LOG.info(pprint.pformat(f"Chat response: {chat_response}"))
+                answer = json.loads(chat_response["choices"][0]["message"]["content"])
+                user_message = prompt_engine.load_prompt("user-step_actor", plan = answer["thoughts"]["plan"])
+                break
+
+            except json.JSONDecodeError as e:
+                # Handle JSON decoding errors
+                LOG.info("Error decoding chat response.")
+                LOG.error(pprint.pformat(f"Unable to decode chat response: {chat_response}"))
+                if attempt == 2:
+                    raise
+            except Exception as e:
+                # Handle other exceptions
+                LOG.info("Error generating chat response.")
+                LOG.error(pprint.pformat(f"Unable to generate chat response: {e}"))
+                if attempt == 2:
+                    raise
+
+        self.action_chat_history.append({"role": "user", "content": user_message})
 
         if ability["name"] == "finish":
             step.is_last = True
