@@ -59,7 +59,7 @@ async def write_file(agent, task_id: str, file_path: str, data: bytes) -> None:
         agent_created=True,
     )
 
-    agent.chat_history.append(
+    agent.action_chat_history.append(
         {"role": "assistant", "content": f"I have now completed the task of writing a file to {file_path} with the following data: {data}"}
     )
 
@@ -81,7 +81,7 @@ async def read_file(agent, task_id: str, file_path: str) -> bytes:
     Read data from a file
     """
 
-    agent.chat_history.append(
+    agent.action_chat_history.append(
         {"role": "assistant", "content": f"I have now completed the task of reading a file from {file_path}"}
     )
 

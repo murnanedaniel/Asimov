@@ -98,16 +98,16 @@ class ForgeAgent(Agent):
 
         # Load up the prompt engine
         LOG.info("Loading prompt engine...")
-        self.prompt_engine = PromptEngine("gpt-3.5-turbo")
+        prompt_engine = PromptEngine("gpt-3.5-turbo")
 
         # Start with a system prompt
         LOG.info("Loading system prompt...")
-        system_prompt_actor = self.prompt_engine.load_prompt("system-format_actor", abilities=self.abilities.list_abilities_for_prompt())
-        system_prompt_planner = self.prompt_engine.load_prompt("system-format_planner", abilities=self.abilities.list_abilities_for_prompt())
+        system_prompt_actor = prompt_engine.load_prompt("system-format_actor", abilities=self.abilities.list_abilities_for_prompt())
+        system_prompt_planner = prompt_engine.load_prompt("system-format_planner", abilities=self.abilities.list_abilities_for_prompt())
 
         # Then, load the task prompt with the designated parameters
         LOG.info("Loading task prompt...")
-        task_prompt_planner = self.prompt_engine.load_prompt("task-intro_planner", task = task.input)
+        task_prompt_planner = prompt_engine.load_prompt("task-intro_planner", task = task.input)
         
         # Create message list
         LOG.info("Creating message list...")
@@ -135,7 +135,7 @@ class ForgeAgent(Agent):
 
         # Load into actor messages
         LOG.info("Loading actor messages...")
-        task_prompt_actor = self.prompt_engine.load_prompt("task-intro_actor", task = task.input, plan = initial_plan)
+        task_prompt_actor = prompt_engine.load_prompt("task-intro_actor", task = task.input, plan = initial_plan)
         messages_actor = [
             {"role": "system", "content": system_prompt_actor},
             {"role": "user", "content": task_prompt_actor}
@@ -194,7 +194,7 @@ class ForgeAgent(Agent):
                     task_id, ability["name"], **ability["args"]
                 )
                 if output:
-                    self.action_chat_history.append({"role": "assistant", "content": f"Here is the output of the ability {ability['name']} applied to {ability['args']}: {output}"})
+                    self.chat_history.append({"role": "assistant", "content": f"Here is the output of the ability {ability['name']} applied to {ability['args']}: {output}"})
                 break
 
             except json.JSONDecodeError as e:
@@ -222,7 +222,7 @@ class ForgeAgent(Agent):
         else:
             step.output = answer
 
-        user_message = self.prompt_engine.load_prompt("user-step_planner", step_output = answer)
+        user_message = prompt_engine.load_prompt("user-step_planner", step_output = answer)
         self.planning_chat_history.append({"role": "user", "content": user_message})
 
         for message in self.planning_chat_history:
@@ -242,7 +242,7 @@ class ForgeAgent(Agent):
                 chat_response = await chat_completion_request(**chat_completion_kwargs)
                 LOG.info(pprint.pformat(f"Chat response: {chat_response}"))
                 answer = json.loads(chat_response["choices"][0]["message"]["content"])
-                user_message = self.prompt_engine.load_prompt("user-step_actor", plan = answer["thoughts"]["plan"])
+                user_message = prompt_engine.load_prompt("user-step_actor", plan = answer["thoughts"]["plan"])
                 break
 
             except json.JSONDecodeError as e:
